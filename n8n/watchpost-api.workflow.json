@@ -1,0 +1,236 @@
+{
+  "name": "WatchPost API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "watchpost",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0aa67042-2b82-4c7f-b722-8f0e26ede50a",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        80
+      ],
+      "webhookId": "4de94f25-3d90-4379-b468-ce4538ace2a2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== WatchPost API (action-routed) =====\n// CHANGE THESE before activating the workflow.\nconst OWNER_EMAIL = 'akalugwusuccess87@gmail.com';\nconst OWNER_PASSWORD = 'change-me-please';\nconst INGEST_KEY = 'change-this-camera-key';\nconst USE_AI = true;            // false = skip the AI and store the event as-is\nconst MAX_ALERTS = 100;\nconst MAX_PHOTOS = 5;           // photos per person (People screen)\nconst MAX_PHOTO_CHARS = 215000; // ~160 KB per photo; 640px JPEGs are usually 40-80 KB\nconst MAX_INBOX_CHARS = 3000000; // total photo inbox size before addPerson is refused\n\nconst SETUP_DONE = OWNER_PASSWORD !== 'change-me-please' && INGEST_KEY !== 'change-this-camera-key';\n\nconst store = $getWorkflowStaticData('global');\nif (!store.alerts) store.alerts = [];\nif (!store.tokens) store.tokens = {};\nif (!store.people) store.people = [];\nif (!store.faceInbox) store.faceInbox = [];\nif (!store.cameras) {\n  store.cameras = [\n    { id: 'cam-1', name: 'Front door', location: 'Front of house', image: 'assets/images/front-door.jpg', enabled: true, source: '' },\n    { id: 'cam-2', name: 'Gate', location: 'Driveway', image: 'assets/images/gate.jpg', enabled: true, source: '' },\n    { id: 'cam-3', name: 'Backyard', location: 'Back of house', image: 'assets/images/backyard.jpg', enabled: false, source: '' },\n  ];\n}\nconst reply = (status, data) => [{ json: { status, body: data } }];\n\nfunction saveAlert(alert) {\n  store.alerts.unshift(alert);\n  store.alerts = store.alerts.slice(0, MAX_ALERTS);\n  // Keep embedded snapshots only on the newest 30 alerts (workflow storage is small).\n  store.alerts.forEach((a, i) => {\n    if (i >= 30 && String(a.image).startsWith('data:')) {\n      const c = store.cameras.find((x) => x.name === a.cameraName);\n      a.image = c ? c.image : 'assets/images/night-car.jpg';\n    }\n  });\n}\n\nconst req = $input.first().json;\nconst body = req.body || {};\nconst headers = req.headers || {};\nconst uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);\nconst action = body.action;\n\n// Safety: do not run with the sample password / camera key.\nif (!SETUP_DONE) {\n  return reply(503, { error: 'Setup not finished: change OWNER_PASSWORD and INGEST_KEY in the n8n API node.' });\n}\n\nconst findPerson = (name) => {\n  const n = String(name || '').trim().toLowerCase();\n  return store.people.find((p) => p.name.toLowerCase() === n && p.status !== 'deleting') || null;\n};\n// Camera address typed in the app: \"192.168.1.50:8080\" (IP Webcam) or a full http(s)/rtsp URL.\nconst cleanSource = (s) => {\n  let v = String(s || '').trim().replace(/\\/+$/, '');\n  if (v.length > 200 || /\\s/.test(v)) return null;\n  if (v === '') return '';\n  if (/^(https?|rtsp):\\/\\/[^\\s\\/]+/i.test(v)) return v;\n  if (/^[A-Za-z0-9.\\-]+(:\\d{1,5})?$/.test(v)) return v;   // host or host:port\n  return null;\n};\nconst stripDataUrl = (s) => String(s).replace(/^data:[^,]*,/, '');\n// Keeps letters from any language (Igbo/Yoruba accents etc.), digits, space, _ and -\nconst folderName = (name) => String(name).replace(/[^\\p{L}\\p{N} _-]/gu, '').trim();\n\n// Plain sentence for a known person (used when the AI is off or fails).\nfunction knownLine(name, cameraName) {\n  const p = findPerson(name);\n  const spot = cameraName.toLowerCase();\n  if (p && p.relation) return 'Your ' + p.relation + ', ' + p.name + ', is at the ' + spot + '.';\n  return name + ' is at the ' + spot + '.';\n}\n\nfunction buildPrompt(cam, hint, personName) {\n  const p = personName !== 'Unknown' ? findPerson(personName) : null;\n  const who = personName === 'Unknown'\n    ? 'The home camera system did not recognise anyone.'\n    : 'The home camera system recognised this person as ' + personName +\n      (p && p.relation ? \" (the homeowner's \" + p.relation + ')' : '') +\n      '. Use this name; do not question it.';\n  return [\n    'You are the warm, friendly voice of a family home security app. Talk to the homeowner like a kind, caring assistant.',\n    'Look at the camera frame and reply with ONLY a JSON object, no other text:',\n    '{\"subject\":\"person|vehicle|animal|package|other|nothing\",\"kind\":\"person|vehicle|motion\",\"tags\":[\"short lowercase tags\"],\"sentence\":\"...\"}',\n    '\"tags\": 1 to 6 short lowercase tags for things you can clearly see, e.g. \"person\", \"shopping bags\", \"umbrella\", \"white car\", \"dog\", \"parcel\".',\n    '\"sentence\": one or two short, kind sentences (under 30 words in total) to be read aloud. Mention the camera spot. ' +\n      'If a recognised person is given, greet them by name and relationship, e.g. \"Your wife Ada is coming up to the front door with shopping bags. You might want to get the door.\" ' +\n      'You may add one gentle, practical suggestion (get the door, collect the parcel, no need to worry). ' +\n      'For people who are not recognised, calmly and politely describe their clothing and what they carry. Never accuse anyone.',\n    'Never identify anyone from their face yourself and never guess names. Only use the recognised name given below.',\n    'Use subject \"nothing\" when there is no meaningful activity (shadows, lighting change, insects, camera noise).',\n    '',\n    'Camera: ' + cam.name + ' (' + cam.location + '). Motion detector guess: ' + hint + '.',\n    who,\n    'Reply with the JSON object only.',\n  ].join('\\n');\n}\n\n// ---- Camera / detector pushes an event (uses x-api-key) ----\nif (action === 'ingest') {\n  if (headers['x-api-key'] !== INGEST_KEY) return reply(401, { error: 'Bad API key' });\n  const cam = store.cameras.find(\n    (c) => c.name.toLowerCase() === String(body.camera || '').toLowerCase()\n  );\n  if (!cam) return reply(404, { error: 'Unknown camera: ' + body.camera });\n  if (!cam.enabled) return reply(200, { ok: true, ignored: 'camera is off' });\n\n  const hint = ['person', 'vehicle', 'motion'].includes(body.kind) ? body.kind : 'motion';\n  let image = body.image || cam.image;\n  if (typeof image !== 'string' || image.length > 70000) image = cam.image;\n  const ts = Number(body.ts) || Date.now();\n  const personName = body.name ? String(body.name).slice(0, 40) : 'Unknown';\n  const person = personName !== 'Unknown' ? findPerson(personName) : null;\n  const ingest = {\n    id: uid(),\n    cameraName: cam.name,\n    image,\n    kind: hint,\n    personName,\n    relation: person && person.relation ? person.relation : null,\n    tags: [],\n    time: ts,\n    seen: false,\n  };\n  const plainKnown = personName !== 'Unknown' ? knownLine(personName, cam.name) : null;\n\n  const frame =\n    typeof body.analysisImage === 'string' && body.analysisImage.length <= 700000\n      ? stripDataUrl(body.analysisImage)\n      : null;\n\n  if (USE_AI && frame) {\n    return [{\n      json: {\n        needsAI: true,\n        ingest,\n        knownLine: plainKnown,\n        prompt: buildPrompt(cam, hint, personName),\n        frame,\n      },\n    }];\n  }\n\n  if (plainKnown) {\n    ingest.kind = 'person';\n    ingest.tags = ['person'];\n    ingest.summary = plainKnown;\n  }\n  saveAlert(ingest);\n  return reply(200, { ok: true, id: ingest.id, summary: ingest.summary || null });\n}\n\n// ---- edge.py face inbox (uses x-api-key) ----\nif (action === 'pendingFaces' || action === 'ackFaces') {\n  if (headers['x-api-key'] !== INGEST_KEY) return reply(401, { error: 'Bad API key' });\n  if (action === 'pendingFaces') {\n    const cameras = store.cameras.map((c) => ({ id: c.id, name: c.name, enabled: !!c.enabled, source: c.source || '' }));\n    return reply(200, { items: store.faceInbox, cameras });\n  }\n  const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];\n  const done = store.faceInbox.filter((i) => ids.includes(i.id));\n  store.faceInbox = store.faceInbox.filter((i) => !ids.includes(i.id));\n  for (const item of done) {\n    if (item.op === 'add') {\n      store.people = store.people.map((p) =>\n        p.id === item.personId ? { ...p, status: 'enrolled', enrolledAt: Date.now() } : p\n      );\n    }\n    if (item.op === 'delete') store.people = store.people.filter((p) => p.id !== item.personId);\n  }\n  return reply(200, { ok: true, cleared: done.length });\n}\n\n// ---- App login ----\nif (action === 'login') {\n  const email = String(body.email || '').trim().toLowerCase();\n  const now = Date.now();\n  // Brute-force guard: 8 wrong tries -> locked for 10 minutes.\n  const lock = store.loginLock || { fails: 0, until: 0 };\n  if (lock.until > now) return reply(429, { error: 'Too many wrong tries. Wait 10 minutes and try again.' });\n  if (email !== OWNER_EMAIL.toLowerCase() || body.password !== OWNER_PASSWORD) {\n    lock.fails = (lock.fails || 0) + 1;\n    if (lock.fails >= 8) { lock.until = now + 10 * 60 * 1000; lock.fails = 0; }\n    store.loginLock = lock;\n    return reply(401, { error: 'Wrong email or password' });\n  }\n  store.loginLock = { fails: 0, until: 0 };\n  for (const t of Object.keys(store.tokens)) if (store.tokens[t] < now) delete store.tokens[t];\n  const token = uid() + uid() + uid();\n  store.tokens[token] = now + 30 * 24 * 3600 * 1000;\n  return reply(200, { token });\n}\n\n// ---- Everything below needs a valid session token (x-token) ----\nconst token = headers['x-token'];\nconst exp = token ? store.tokens[token] : null;\nif (!exp || exp < Date.now()) return reply(401, { error: 'Session expired' });\n\nswitch (action) {\n  case 'getState': {\n    // The app lists ids it already holds a snapshot for; we skip re-sending those images.\n    const have = new Set(Array.isArray(body.have) ? body.have.map(String) : []);\n    const alerts = store.alerts.map((a) =>\n      have.has(a.id) && String(a.image).startsWith('data:') ? { ...a, image: '' } : a\n    );\n    return reply(200, { alerts, cameras: store.cameras, people: store.people });\n  }\n  case 'markSeen':\n    store.alerts = store.alerts.map((a) => (a.id === body.id ? { ...a, seen: true } : a));\n    return reply(200, { ok: true });\n  case 'markAllSeen':\n    store.alerts = store.alerts.map((a) => ({ ...a, seen: true }));\n    return reply(200, { ok: true });\n  case 'deleteAlert':\n    store.alerts = store.alerts.filter((a) => a.id !== body.id);\n    return reply(200, { ok: true });\n  case 'setCameras':\n    if (!Array.isArray(body.cameras)) return reply(400, { error: 'cameras must be a list' });\n    const cleaned = [];\n    for (const c of body.cameras) {\n      const source = cleanSource(c.source);\n      if (source === null) return reply(400, { error: 'Camera address for \"' + String(c.name) + '\" looks wrong. Use e.g. 192.168.1.50:8080' });\n      cleaned.push({\n        id: String(c.id),\n        name: String(c.name).trim().slice(0, 40),\n        location: String(c.location || 'Not set').slice(0, 60),\n        image: String(c.image).slice(0, 200),\n        enabled: !!c.enabled,\n        source,\n      });\n    }\n    const names = cleaned.map((c) => c.name.toLowerCase());\n    if (names.some((n, i) => !n || names.indexOf(n) !== i)) return reply(400, { error: 'Each camera needs a different, non-empty name' });\n    store.cameras = cleaned;\n    return reply(200, { ok: true });\n  case 'listPeople':\n    return reply(200, { people: store.people });\n  case 'addPerson': {\n    const name = String(body.name || '').trim().slice(0, 40);\n    const relation = String(body.relation || '').trim().slice(0, 30) || null;\n    const photos = Array.isArray(body.photos) ? body.photos : [];\n    if (!name || !folderName(name)) return reply(400, { error: 'name is required (letters, numbers, spaces)' });\n    if (store.people.some((p) => p.status !== 'deleting' && folderName(p.name).toLowerCase() === folderName(name).toLowerCase())) {\n      return reply(409, { error: 'A person with a very similar name already exists' });\n    }\n    if (findPerson(name)) return reply(409, { error: name + ' is already enrolled' });\n    if (photos.length < 1 || photos.length > MAX_PHOTOS) {\n      return reply(400, { error: 'send 1 to ' + MAX_PHOTOS + ' photos' });\n    }\n    if (photos.some((ph) => typeof ph !== 'string' || ph.length > MAX_PHOTO_CHARS)) {\n      return reply(413, { error: 'each photo must be a base64 JPEG under about 150 KB (resize to 640px)' });\n    }\n    const clean = photos.map(stripDataUrl);\n    const inboxSize = store.faceInbox.reduce(\n      (n, i) => n + (i.photos || []).reduce((m, p) => m + p.length, 0), 0\n    );\n    const newSize = clean.reduce((n, p) => n + p.length, 0);\n    if (inboxSize + newSize > MAX_INBOX_CHARS) {\n      return reply(503, { error: 'Photo inbox is full. Make sure edge.py is running, then try again.' });\n    }\n    const person = {\n      id: uid(),\n      name,\n      relation,\n      status: 'pending',\n      photoCount: clean.length,\n      createdAt: Date.now(),\n    };\n    store.people.push(person);\n    store.faceInbox.push({\n      id: uid(),\n      op: 'add',\n      personId: person.id,\n      name,\n      folder: folderName(name),\n      photos: clean,\n      createdAt: Date.now(),\n    });\n    return reply(200, { ok: true, person });\n  }\n  case 'deletePerson': {\n    const person = store.people.find((p) => p.id === body.id);\n    if (!person) return reply(404, { error: 'Person not found' });\n    if (person.status === 'deleting') return reply(200, { ok: true, removed: false, status: 'deleting' });\n    const pendingAdd = store.faceInbox.find((i) => i.op === 'add' && i.personId === person.id);\n    if (pendingAdd) {\n      // edge.py never received the photos, so just drop everything here.\n      store.faceInbox = store.faceInbox.filter((i) => i.id !== pendingAdd.id);\n      store.people = store.people.filter((p) => p.id !== person.id);\n      return reply(200, { ok: true, removed: true });\n    }\n    store.people = store.people.map((p) => (p.id === person.id ? { ...p, status: 'deleting' } : p));\n    store.faceInbox.push({\n      id: uid(),\n      op: 'delete',\n      personId: person.id,\n      name: person.name,\n      folder: folderName(person.name),\n      createdAt: Date.now(),\n    });\n    return reply(200, { ok: true, removed: false, status: 'deleting' });\n  }\n  // ---- Demo tools (app -> \"Demo tools\"): canned alerts, no camera or AI needed ----\n  case 'testAlert': {\n    const cam = store.cameras.find((x) => x.name.toLowerCase() === String(body.camera || '').toLowerCase())\n      || store.cameras.find((x) => x.enabled) || store.cameras[0];\n    if (!cam) return reply(400, { error: 'Add a camera first' });\n    const spot = cam.name.toLowerCase();\n    const scenario = ['known', 'stranger', 'vehicle'].includes(body.scenario) ? body.scenario : 'known';\n    const alert = { id: uid(), cameraName: cam.name, image: cam.image, kind: 'person', personName: 'Unknown',\n                    relation: null, tags: [], time: Date.now(), seen: false };\n    if (scenario === 'known') {\n      const p = store.people.find((x) => x.status !== 'deleting') || { name: 'Ada', relation: 'wife' };\n      alert.personName = p.name;\n      alert.relation = p.relation || null;\n      alert.tags = ['person', 'shopping bags'];\n      alert.summary = (p.relation ? 'Your ' + p.relation + ', ' + p.name : p.name) +\n        ', is coming up to the ' + spot + ' with shopping bags. You might want to get the door.';\n    } else if (scenario === 'stranger') {\n      alert.tags = ['person', 'blue jacket', 'parcel'];\n      alert.summary = 'Someone in a blue jacket is at the ' + spot + ', holding a parcel. Nothing to worry about, but you may want to take a look.';\n    } else {\n      alert.kind = 'vehicle';\n      alert.image = 'assets/images/night-car.jpg';\n      alert.tags = ['vehicle', 'white car'];\n      alert.summary = 'A white car has stopped near the ' + spot + '.';\n    }\n    saveAlert(alert);\n    return reply(200, { ok: true, id: alert.id });\n  }\n  case 'clearAlerts':\n    store.alerts = [];\n    return reply(200, { ok: true });\n  case 'logout':\n    delete store.tokens[token];\n    return reply(200, { ok: true });\n  default:\n    return reply(400, { error: 'Unknown action: ' + action });\n}\n"
+      },
+      "id": "25e7dcb2-c512-4f4f-9b91-e654534632b4",
+      "name": "API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "needs-ai",
+              "leftValue": "={{ $json.needsAI === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0a6c5cd0-0c10-43f8-983c-b2edc769614b",
+      "name": "Needs AI?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        448,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "frame",
+        "options": {
+          "fileName": "frame.jpg",
+          "mimeType": "image/jpeg"
+        }
+      },
+      "id": "edac79dd-39cd-4161-87e6-08ba26488edc",
+      "name": "Frame to Image",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        560,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-haiku-4-5-20251001",
+          "cachedResultName": "claude-haiku-4-5-20251001"
+        },
+        "text": "={{ $('API').first().json.prompt }}",
+        "inputType": "binary",
+        "options": {
+          "maxTokens": 300
+        }
+      },
+      "id": "64977d07-fb24-45c2-becf-e209697cec24",
+      "name": "Describe",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        784,
+        -192
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== WatchPost Save (runs after the AI step) =====\n// If the AI failed or is out of credit, we still store a plain alert.\nconst MAX_ALERTS = 100;\n\nconst store = $getWorkflowStaticData('global');\nif (!store.alerts) store.alerts = [];\nif (!store.cameras) store.cameras = [];\nconst reply = (status, data) => [{ json: { status, body: data } }];\n\nfunction saveAlert(alert) {\n  store.alerts.unshift(alert);\n  store.alerts = store.alerts.slice(0, MAX_ALERTS);\n  // Keep embedded snapshots only on the newest 30 alerts (workflow storage is small).\n  store.alerts.forEach((a, i) => {\n    if (i >= 30 && String(a.image).startsWith('data:')) {\n      const c = store.cameras.find((x) => x.name === a.cameraName);\n      a.image = c ? c.image : 'assets/images/night-car.jpg';\n    }\n  });\n}\n\nconst src = $('API').first().json;\nconst res = $input.first().json || {};\nconst alert = { ...src.ingest };\n\n// Read the AI text (the Anthropic node returns content blocks).\nlet text = '';\nif (Array.isArray(res.content)) {\n  const block = res.content.find((c) => c && c.type === 'text');\n  text = block ? block.text : '';\n} else if (typeof res.content === 'string') {\n  text = res.content;\n} else if (typeof res.text === 'string') {\n  text = res.text;\n} else if (typeof res.merged_response === 'string') {\n  text = res.merged_response;\n}\n\nlet ai = null;\ntry {\n  const m = String(text).match(/\\{[\\s\\S]*\\}/);\n  ai = m ? JSON.parse(m[0]) : null;\n} catch (e) {\n  ai = null;\n}\n\nconst known = src.ingest.personName && src.ingest.personName !== 'Unknown';\nif (ai && ai.subject === 'nothing' && !known) {\n  return reply(200, { ok: true, ignored: 'nothing of interest' });\n}\n\nif (ai) {\n  if (['person', 'vehicle', 'motion'].includes(ai.kind)) alert.kind = ai.kind;\n  else if (ai.subject === 'person') alert.kind = 'person';\n  else if (ai.subject === 'vehicle') alert.kind = 'vehicle';\n  else alert.kind = 'motion';\n  if (ai.sentence) alert.summary = String(ai.sentence).slice(0, 240);\n  if (Array.isArray(ai.tags)) {\n    alert.tags = ai.tags\n      .filter((t) => typeof t === 'string' && t.trim())\n      .map((t) => t.trim().toLowerCase().slice(0, 30))\n      .slice(0, 6);\n  }\n}\n\nif (known) {\n  // Recognised by edge.py: keep the friendly AI sentence, fall back to the plain one.\n  alert.personName = src.ingest.personName;\n  alert.kind = 'person';\n  if (!alert.summary) alert.summary = src.knownLine;\n  if (!alert.tags || alert.tags.length === 0) alert.tags = ['person'];\n}\n\nsaveAlert(alert);\nreturn reply(200, {\n  ok: true,\n  id: alert.id,\n  summary: alert.summary || null,\n  tags: alert.tags || [],\n  ai: !!ai,\n});\n"
+      },
+      "id": "617b2c1b-43e9-45a8-b115-d3f7042beec1",
+      "name": "Save",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      },
+      "id": "a55009fa-588d-4020-a5db-85ff3e3d2b2f",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        96
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API": {
+      "main": [
+        [
+          {
+            "node": "Needs AI?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs AI?": {
+      "main": [
+        [
+          {
+            "node": "Frame to Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Frame to Image": {
+      "main": [
+        [
+          {
+            "node": "Describe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Describe": {
+      "main": [
+        [
+          {
+            "node": "Save",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}

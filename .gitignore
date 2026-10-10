@@ -1,0 +1,16 @@
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+
+# Private stuff - never commit
+edge/faces/*/
+!edge/faces/*/PUT_PHOTOS_HERE.txt
+edge/*.onnx
+edge/run_edge.bat
+edge/run_edge.sh
+*.apk
+*.aab
+key.properties
