@@ -12,16 +12,20 @@ import '../services/api_service.dart';
 import '../services/speaker.dart';
 
 class Assets {
-  static const frontDoor = 'assets/images/front-door.jpg';
-  static const gate = 'assets/images/gate.jpg';
-  static const backyard = 'assets/images/backyard.jpg';
-  static const night = 'assets/images/night-car.jpg';
+  // Real photos from the CPE lab / SESET building (see assets/images/).
+  static const labEntrance = 'assets/images/lab-entrance.jpg';
+  static const labEntranceNight = 'assets/images/lab-entrance-night.jpg';
+  static const labBench = 'assets/images/lab-bench.jpg';
+  static const hodOffice = 'assets/images/hod-office.jpg';
+  static const drawingRoom = 'assets/images/drawing-room.jpg';
+  static const stairwell = 'assets/images/stairwell.jpg';
+  static const cameraMounted = 'assets/images/camera-mounted.jpg';
 
   static const choices = <(String, String)>[
-    ('Door', frontDoor),
-    ('Gate', gate),
-    ('Yard', backyard),
-    ('Night', night),
+    ('Lab', labEntrance),
+    ('Bench', labBench),
+    ('HOD', hodOffice),
+    ('Drawing', drawingRoom),
   ];
 }
 
@@ -83,7 +87,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       final rawCameras = _prefs.getString('cameras');
       final rawPeople = _prefs.getString('people');
       people = rawPeople == null
-          ? []
+          ? (isRemote ? [] : _seedPeople())
           : (jsonDecode(rawPeople) as List)
               .map((e) => PersonModel.fromJson(e as Map<String, dynamic>))
               .toList();
@@ -100,6 +104,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {
       alerts = isRemote ? [] : _seedAlerts();
       cameras = isRemote ? [] : _seedCameras();
+      people = isRemote ? [] : _seedPeople();
     }
   }
 
@@ -302,9 +307,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<String?> sendTestAlert(String scenario) async {
     final api = _api;
     final cam = cameras.where((c) => c.enabled).firstOrNull ?? cameras.firstOrNull;
-    final camName = cam?.name ?? 'Front door';
+    final camName = cam?.name ?? 'CPE lab';
     if (api == null) {
-      final alert = _demoAlert(scenario, camName, cam?.image ?? Assets.frontDoor);
+      final alert = _demoAlert(scenario, camName, cam?.image ?? Assets.labEntrance);
       alerts = [alert, ...alerts];
       _showToast(alert);
       _announce(alert);
@@ -352,7 +357,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     switch (scenario) {
       case 'vehicle':
         return AlertModel(
-          id: id, cameraName: camName, image: Assets.night, kind: DetectionKind.vehicle,
+          id: id, cameraName: camName, image: Assets.labEntranceNight, kind: DetectionKind.vehicle,
           personName: 'Unknown', time: now, seen: false,
           summary: 'A white car has stopped near the $spot.',
           tags: const ['vehicle', 'white car'],
@@ -361,9 +366,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         return AlertModel(
           id: id, cameraName: camName, image: camImage, kind: DetectionKind.person,
           personName: 'Unknown', time: now, seen: false,
-          summary: 'Someone in a blue jacket is at the $spot, holding a parcel. '
+          summary: 'An unrecognised person is at the $spot. '
               'Nothing to worry about, but you may want to take a look.',
-          tags: const ['person', 'blue jacket', 'parcel'],
+          tags: const ['person'],
         );
       default:
         final p = people.firstOrNull;
@@ -373,9 +378,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           id: id, cameraName: camName, image: camImage, kind: DetectionKind.person,
           personName: name, time: now, seen: false,
           relation: rel.isEmpty ? null : rel,
-          summary: '${rel.isEmpty ? name : 'Your $rel, $name'}, is coming up to the $spot '
-              'with shopping bags. You might want to get the door.',
-          tags: const ['person', 'shopping bags'],
+          summary: '${rel.isEmpty ? name : 'Your $rel, $name'}, is at the $spot.',
+          tags: const ['person'],
         );
     }
   }
@@ -525,7 +529,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       const kinds = [
         DetectionKind.person,
         DetectionKind.person,
-        DetectionKind.vehicle,
         DetectionKind.motion,
       ];
       final kind = kinds[_rng.nextInt(kinds.length)];
@@ -534,8 +537,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         cameraName: cam.name,
         image: cam.image,
         kind: kind,
-        personName:
-            kind == DetectionKind.person && _rng.nextBool() ? 'AKALUGWU' : 'Unknown',
+        personName: kind == DetectionKind.person &&
+                people.isNotEmpty &&
+                _rng.nextBool()
+            ? people[_rng.nextInt(people.length)].name
+            : 'Unknown',
         time: DateTime.now(),
         seen: false,
       );
@@ -554,17 +560,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return d;
   }
 
+  static List<PersonModel> _seedPeople() => const [
+        PersonModel(id: 'p1', name: 'Aligah', relation: 'coursemate', enrolled: true),
+        PersonModel(id: 'p2', name: 'Gerand', relation: 'coursemate', enrolled: true),
+        PersonModel(id: 'p3', name: 'Bethany', relation: 'coursemate', enrolled: true),
+      ];
+
   static List<AlertModel> _seedAlerts() => [
-        AlertModel(id: 'a1', cameraName: 'Front door', image: Assets.frontDoor, kind: DetectionKind.person, personName: 'AKALUGWU', time: _todayAt(1, 12), seen: false),
-        AlertModel(id: 'a2', cameraName: 'Gate', image: Assets.gate, kind: DetectionKind.vehicle, personName: 'Unknown', time: _todayAt(0, 48), seen: true),
-        AlertModel(id: 'a3', cameraName: 'Backyard', image: Assets.backyard, kind: DetectionKind.person, personName: 'AKALUGWU', time: _todayAt(23, 31), seen: true),
-        AlertModel(id: 'a4', cameraName: 'Front door', image: Assets.night, kind: DetectionKind.motion, personName: 'Unknown', time: _todayAt(22, 17), seen: true),
+        AlertModel(id: 'a1', cameraName: 'HOD office', image: Assets.hodOffice, kind: DetectionKind.person, personName: 'Aligah', relation: 'coursemate', time: _todayAt(1, 12), seen: false),
+        AlertModel(id: 'a2', cameraName: 'CPE lab', image: Assets.labBench, kind: DetectionKind.motion, personName: 'Unknown', time: _todayAt(0, 48), seen: true),
+        AlertModel(id: 'a3', cameraName: 'CPE lab', image: Assets.labEntranceNight, kind: DetectionKind.motion, personName: 'Unknown', time: _todayAt(23, 41), seen: true),
+        AlertModel(id: 'a4', cameraName: 'Stairwell', image: Assets.stairwell, kind: DetectionKind.person, personName: 'Unknown', time: _todayAt(22, 17), seen: true),
       ]..sort((a, b) => b.time.compareTo(a.time));
 
   static List<CameraModel> _seedCameras() => const [
-        CameraModel(id: 'cam-1', name: 'Front door', location: 'Front of house', image: Assets.frontDoor, enabled: true),
-        CameraModel(id: 'cam-2', name: 'Gate', location: 'Driveway', image: Assets.gate, enabled: true),
-        CameraModel(id: 'cam-3', name: 'Backyard', location: 'Back of house', image: Assets.backyard, enabled: false),
+        CameraModel(id: 'cam-1', name: 'CPE lab', location: 'Entrance', image: Assets.labEntrance, enabled: true),
+        CameraModel(id: 'cam-2', name: 'CPE lab bench', location: 'CPE lab', image: Assets.labBench, enabled: true),
+        CameraModel(id: 'cam-3', name: 'HOD office', location: 'CPE department', image: Assets.hodOffice, enabled: true),
+        CameraModel(id: 'cam-4', name: 'CPE drawing room', location: 'CPE department', image: Assets.drawingRoom, enabled: true),
       ];
 
   @override

@@ -28,7 +28,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   static final _slides = <_Slide>[
     const _Slide(
       'Watch every corner',
-      'Connect your cameras — front door, gate, backyard — and choose which ones are watching at any time.',
+      'Connect your cameras — CPE lab, HOD office, drawing room — and choose which ones are watching at any time.',
       _CamerasVisual(),
     ),
     const _Slide(
@@ -174,11 +174,11 @@ class _CamerasVisual extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        AssetThumb(Assets.frontDoor, width: 80, height: 150, radius: 12),
+        AssetThumb(Assets.hodOffice, width: 80, height: 150, radius: 12),
         SizedBox(width: 10),
-        AssetThumb(Assets.gate, width: 80, height: 180, radius: 12),
+        AssetThumb(Assets.cameraMounted, width: 80, height: 180, radius: 12),
         SizedBox(width: 10),
-        AssetThumb(Assets.backyard, width: 80, height: 150, radius: 12),
+        AssetThumb(Assets.labBench, width: 80, height: 150, radius: 12),
       ],
     );
   }
@@ -192,11 +192,11 @@ class _PeopleVisual extends StatelessWidget {
     return const Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AssetThumb(Assets.frontDoor, width: 150, height: 110, radius: 14),
+        AssetThumb(Assets.hodOffice, width: 150, height: 110, radius: 14),
         SizedBox(height: 14),
         Row(
           mainAxisSize: MainAxisSize.min,
-          children: [NameChip('AKALUGWU'), SizedBox(width: 8), NameChip('Unknown')],
+          children: [NameChip('Aligah'), SizedBox(width: 8), NameChip('Unknown')],
         ),
       ],
     );
@@ -211,9 +211,9 @@ class _AlertsVisual extends StatelessWidget {
     return const Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _MiniAlert(Assets.gate, 'Vehicle detected at Gate', unseen: true),
+        _MiniAlert(Assets.hodOffice, 'Person detected at HOD office', unseen: true),
         SizedBox(height: 12),
-        _MiniAlert(Assets.night, 'Motion detected at Front door'),
+        _MiniAlert(Assets.labEntranceNight, 'Motion detected at CPE lab'),
       ],
     );
   }
